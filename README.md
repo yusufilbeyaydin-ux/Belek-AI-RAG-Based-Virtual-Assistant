@@ -3,7 +3,7 @@
 > **Belek Üniversitesi için RAG mimarili Türkçe akademik sanal asistan.**
 > Yusuf İlbey Aydın'ın bitirme tez projesi.
 
-Belek AI; üniversitenin yönetmelikleri, akademik takvimleri, bölüm/program sayfaları, idari belgeleri ve duyurularına dayalı doğal dil soru-cevap sağlar. Kullanıcı sorduğu soruyu, Qdrant üzerinde **hibrit arama** (dense embedding + BM42 sparse) ile en alakalı belge parçalarına eşleştirir; cross-encoder ile yeniden sıralar; ardından Groq Llama 3.3 70B (veya OpenAI/Gemini) üzerinde, sıkı kurallarla yazılmış bir prompt ile yanıt üretir.
+Belek AI; üniversitenin yönetmelikleri, akademik takvimleri, bölüm/program sayfaları, idari belgeleri ve duyurularına dayalı doğal dil soru-cevap sağlar. Kullanıcı sorduğu soruyu Qdrant üzerinde **dense anlamsal arama** (768d kosinüs, HNSW indeksi) ile en alakalı belge parçalarına eşleştirir; ardından **cross-encoder** (`BAAI/bge-reranker-base`) ile iki aşamalı (retrieve-then-rerank) olarak yeniden sıralar; son olarak Groq Llama 3.3 70B (veya OpenAI/Gemini) üzerinde sıkı kurallarla yazılmış bir prompt ile yanıt üretir. Qdrant koleksiyon şemasında BM42 sparse vektör config'i hazır bulundurulmakta; aktif kullanım yol haritasının ileri sürümüne (v2.1) bırakılmıştır.
 
 ---
 
@@ -43,7 +43,7 @@ ingestion_list.json (84 kaynak)  │  Firecrawl  │  Docling  │  Local files 
             ───────────────────▶ │   raw_*  →  hash_dedup  →  clean  →  chunk   │
                                  │                                  ↓            │
                                  │                          Qdrant Cloud         │
-                                 │                          (dense 768d + BM42)  │
+                                 │                          (dense 768d cosine)  │
                                  ╰───────────────────────────────────────────────╯
                                                   ▲
                                                   │ retrieval
@@ -51,7 +51,7 @@ ingestion_list.json (84 kaynak)  │  Firecrawl  │  Docling  │  Local files 
    ┌────────── Frontend ──────────┐   POST /ask  ┌──────────── Backend (FastAPI) ────────┐
    │ React 19 + Vite + Tailwind   │ ───────────▶ │ analyze_query (Groq llama-3.1-8b)     │
    │ ChatHeader · ChatMessage     │              │     ↓                                 │
-   │ ChatInput · SettingsModal    │              │ Qdrant hybrid search (k = 5/15/18/40) │
+   │ ChatInput · SettingsModal    │              │ Qdrant dense search   (k = 5/15/18/40) │
    │ localStorage persist         │              │     ↓                                 │
    │ Markdown render + feedback   │              │ Cross-encoder rerank (bge-base)       │
    └──────────────────────────────┘              │     ↓                                 │
@@ -79,7 +79,7 @@ Detaylı mimari için: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · [`docs/
 | **Backend** | FastAPI · Uvicorn · slowapi (rate limit) · python-dotenv |
 | **LLM** | Groq (Llama 3.3 70B + fallback) · OpenAI (gpt-4o-mini) · Gemini (2.5-flash) — `LLM_PROVIDER` ile seçim |
 | **LLM framework** | LangChain · langchain-groq · langchain-openai · langchain-google-genai |
-| **Vector DB** | Qdrant ≥1.9 (Cloud aktif, dense 768d + BM42 sparse) |
+| **Vector DB** | Qdrant ≥1.9 (Cloud aktif, dense 768d kosinüs, HNSW) |
 | **Embedding** | `sentence-transformers/paraphrase-multilingual-mpnet-base-v2` (Türkçe destekli) |
 | **Reranker** | `BAAI/bge-reranker-base` (cross-encoder, query-time) |
 | **Pipeline** | Dagster ≥1.7 (asset DAG, incremental dedup, web UI) |
@@ -170,43 +170,71 @@ Tam liste: [`CLAUDE.md` §10](CLAUDE.md) · Şablon: [`.env.example`](.env.examp
 
 ### 5.3 (Opsiyonel) PostgreSQL Şeması
 
-İnteraksiyon loglaması istiyorsan `belek_chatbot` şemasını kur:
+İnteraksiyon loglaması istiyorsan `belek_chatbot` şemasını kur. Aşağıdaki DDL **canlı veritabanı (Neon) şemasıyla birebir** uyumludur; her tablo işlevsel sütunların yanında ortak denetim (audit) sütunları içerir.
 
 ```sql
 CREATE SCHEMA IF NOT EXISTS belek_chatbot;
 SET search_path TO belek_chatbot;
 
 CREATE TABLE sessions (
-  id SERIAL PRIMARY KEY,
-  user_ip VARCHAR(45) NOT NULL,
-  start_time TIMESTAMP NOT NULL DEFAULT NOW()
+  id          SERIAL PRIMARY KEY,
+  user_ip     VARCHAR(45) NOT NULL,
+  start_time  TIMESTAMP   NOT NULL DEFAULT NOW(),
+  -- audit
+  is_active   BOOLEAN   DEFAULT TRUE,
+  created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  created_by  INTEGER,
+  updated_at  TIMESTAMP,
+  updated_by  INTEGER
 );
 CREATE TABLE messages (
-  id SERIAL PRIMARY KEY,
-  session_id INTEGER NOT NULL REFERENCES sessions(id),
-  role VARCHAR(50) NOT NULL,
-  content TEXT NOT NULL,
-  timestamp TIMESTAMP NOT NULL DEFAULT NOW()
+  id          SERIAL PRIMARY KEY,
+  session_id  INTEGER NOT NULL REFERENCES sessions(id),
+  role        VARCHAR(50) NOT NULL,            -- 'user' | 'assistant' (CHECK yok)
+  content     TEXT NOT NULL,
+  timestamp   TIMESTAMP NOT NULL DEFAULT NOW(),
+  is_active   BOOLEAN   DEFAULT TRUE,
+  created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  created_by  INTEGER,
+  updated_at  TIMESTAMP,
+  updated_by  INTEGER
 );
 CREATE TABLE citations (
-  id SERIAL PRIMARY KEY,
-  message_id INTEGER NOT NULL REFERENCES messages(id),
-  doc_name VARCHAR(255) NOT NULL,
-  page_num INTEGER
+  id          SERIAL PRIMARY KEY,
+  message_id  INTEGER NOT NULL REFERENCES messages(id),
+  doc_name    VARCHAR(255) NOT NULL,
+  page_num    INTEGER,
+  is_active   BOOLEAN   DEFAULT TRUE,
+  created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  created_by  INTEGER,
+  updated_at  TIMESTAMP,
+  updated_by  INTEGER
 );
 CREATE TABLE feedback (
-  id SERIAL PRIMARY KEY,
-  message_id INTEGER NOT NULL UNIQUE REFERENCES messages(id),
+  id          SERIAL PRIMARY KEY,
+  message_id  INTEGER NOT NULL UNIQUE REFERENCES messages(id),
   is_positive BOOLEAN NOT NULL,
-  comment TEXT
+  comment     TEXT,
+  is_active   BOOLEAN   DEFAULT TRUE,
+  created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  created_by  INTEGER,
+  updated_at  TIMESTAMP,
+  updated_by  INTEGER
 );
 CREATE TABLE system_logs (
-  id SERIAL PRIMARY KEY,
-  message_id INTEGER NOT NULL UNIQUE REFERENCES messages(id),
-  latency_ms INTEGER,
-  error_status VARCHAR(255)
+  id           SERIAL PRIMARY KEY,
+  message_id   INTEGER NOT NULL UNIQUE REFERENCES messages(id),
+  latency_ms   INTEGER,
+  error_status VARCHAR(255),
+  is_active    BOOLEAN   DEFAULT TRUE,
+  created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  created_by   INTEGER,
+  updated_at   TIMESTAMP,
+  updated_by   INTEGER
 );
 ```
+
+> **Denetim (audit) sütunları:** `created_at` ve `is_active` veritabanı varsayılanlarıyla otomatik dolar. `created_by`/`updated_by`/`updated_at` alanları uygulama tarafından yazılmaz (kullanıcı kimlik doğrulaması v2.1'e ertelenmiştir) → NULL kalır. Canlı şemada `created_by`/`updated_by`, kullanıcı tablosuna `ON DELETE SET NULL` ile bağlı INTEGER yabancı anahtarlardır. `backend/db.py` yalnızca işlevsel sütunlara INSERT yapar; audit sütunları varsayılan/NULL üzerinden çalışır.
 
 > **RLS Uyarısı** (Supabase vb.): `db.py` `INSERT INTO belek_chatbot.*` yazar. RLS aktifse bot kullanıcısına ya `ALTER USER bot_user BYPASSRLS;` ver, ya da açık INSERT policy yaz. Aksi halde `log_interaction()` sessizce fail eder (loglarda stack trace görünür).
 

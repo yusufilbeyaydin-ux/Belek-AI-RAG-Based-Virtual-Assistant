@@ -186,8 +186,9 @@ def _build_qdrant_retriever(
     embedding_model: str = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
 ):
     """
-    Qdrant hybrid arama fonksiyonu döndürür.
-    Eval modülü içinde standalone çalışabilir.
+    Qdrant dense semantic search retriever fonksiyonu döndürür.
+    Eval modülü içinde standalone çalışabilir. Sparse/BM42 aktif değil
+    (bkz. backend/pipeline_v2/schemas/qdrant_schema.py).
 
     Bağlantı modu (öncelik): url (cloud) > host:port (local)
     """

@@ -1,11 +1,15 @@
 """
-Soru-Cevap Motoru — Qdrant Hybrid Search + Cross-Encoder Reranking.
+Soru-Cevap Motoru — Dense Semantic Search + Cross-Encoder Reranking.
 
-Pipeline: Qdrant built-in hybrid (dense + BM42 sparse) + bge-reranker-base
+Pipeline: Qdrant dense vector search (768d cosine, HNSW) + bge-reranker-base
+          NOT: Koleksiyon şemasında BM42 IDF sparse vector config bulunur
+          (qdrant_schema.py:76) ancak veri noktalarına yazılmaz ve sorguda
+          using="dense" ile yalnız dense aranır. Sparse aktivasyonu v2.1
+          yol haritasında — fastembed + Prefetch + FusionQuery(RRF) gerektirir.
 LLM:      LLM_PROVIDER env var ile seçilir (varsayılan: groq)
           - groq:   llama-3.3-70b → llama-4-scout → llama-3.1-8b-instant fallback
           - openai: gpt-4o-mini
-          - gemini: gemini-2.0-flash → gemini-1.5-flash fallback
+          - gemini: gemini-2.5-flash → gemini-2.5-flash-lite fallback
 
 Lazy initialization: Tüm modeller ilk istekte yüklenir.
 Qdrant veya LLM erişilemezse RuntimeError fırlatır → main.py 503 olarak döner.
@@ -139,7 +143,12 @@ def _hybrid_search_v2(
     k: int = 10,
 ) -> tuple[list[dict], str, bool]:
     """
-    Qdrant hybrid arama: dense + BM42.
+    Qdrant dense semantic search (using="dense", cosine, HNSW).
+
+    Fonksiyon adı tarihsel olarak "hybrid"; gerçekte yalnız dense vektör
+    aramaktadır. Sparse/BM42 koleksiyon şemasında tanımlı ama veri ve sorgu
+    seviyesinde aktif değil. İkinci aşamadaki cross-encoder rerank,
+    klasik keyword sinyalini örtük olarak yakalar.
 
     Returns:
         (results, effective_category, used_fallback)

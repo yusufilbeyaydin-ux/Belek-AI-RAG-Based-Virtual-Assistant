@@ -15,7 +15,7 @@ ingestion_list.json (54 kaynak, 54 kategori)
                 │
         semantic_chunks ──── Heading-aware chunking (800 char, 150 overlap)
                 │
-        qdrant_collection ── Dense (768d) + BM42 sparse vektörler
+        qdrant_collection ── Dense (768d) — sparse şemada tanımlı, aktif değil
 ```
 
 ## Sorgu Akışı
@@ -26,7 +26,7 @@ Kullanıcı sorusu
     analyze_query() ─── LLM ile kategori tespiti + sorgu optimizasyonu
         │                (llama-3.1-8b-instant, max 60 token)
         │
-    Qdrant hybrid search ── Dense (768d) + BM42 sparse
+    Qdrant dense search ── 768d kosinüs, HNSW (m=16, ef_construct=100)
         │
     Cross-Encoder Reranking ── BAAI/bge-reranker-base
         │
@@ -64,7 +64,7 @@ yine `RuntimeError`.
 | Bileşen | Teknoloji | Neden |
 |---------|-----------|-------|
 | LLM | Groq (Llama 3.3 70B) | Ücretsiz tier, düşük latency |
-| Vector DB | Qdrant | Built-in hybrid search, dense + BM42 sparse |
+| Vector DB | Qdrant | HNSW indeks, dense kosinüs arama; sparse/BM42 şema hazır (v2.1 yol haritası) |
 | Embedding | paraphrase-multilingual-mpnet-base-v2 | Türkçe desteği, 768d |
 | Reranker | BAAI/bge-reranker-base | Cross-encoder, query-time reranking |
 | Pipeline | Dagster | Asset-based DAG, incremental processing |

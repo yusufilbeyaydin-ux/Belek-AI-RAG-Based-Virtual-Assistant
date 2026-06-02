@@ -2,8 +2,11 @@
 Qdrant Collection Şeması — belek_v2.
 
 Named vectors:
-  - "dense"  : 768-boyutlu yoğun vektör (HuggingFace multilingual-mpnet)
-  - "sparse" : BM42 seyrek vektör (Qdrant built-in keyword arama)
+  - "dense"  : 768-boyutlu yoğun vektör (HuggingFace multilingual-mpnet) — AKTİF
+  - "sparse" : BM42 IDF seyrek vektör config'i — şemada tanımlı, AKTİF DEĞİL
+               (qdrant_assets.py upsert sırasında sparse yazmaz;
+               query_v2.py sorguda using="dense" ile yalnız dense arar.
+               v2.1: fastembed BM42 + Prefetch + FusionQuery(RRF))
 
 Payload index'ler hızlı filtreleme için tanımlanır.
 
@@ -11,6 +14,7 @@ Kullanım:
     from backend.pipeline_v2.schemas.qdrant_schema import create_collection_if_not_exists
     create_collection_if_not_exists(client, "belek_v2")
 """
+
 from __future__ import annotations
 
 import logging
@@ -35,13 +39,13 @@ SPARSE_VECTOR_NAME = "sparse"
 
 # Filtrelenecek payload alanları ve index türleri
 _PAYLOAD_INDEXES: dict[str, PayloadSchemaType] = {
-    "doc_category":  PayloadSchemaType.KEYWORD,
-    "fmt":           PayloadSchemaType.KEYWORD,
-    "is_active":     PayloadSchemaType.BOOL,
-    "access_level":  PayloadSchemaType.KEYWORD,
-    "source":        PayloadSchemaType.KEYWORD,
-    "crawled_at":    PayloadSchemaType.DATETIME,
-    "last_updated":  PayloadSchemaType.DATETIME,
+    "doc_category": PayloadSchemaType.KEYWORD,
+    "fmt": PayloadSchemaType.KEYWORD,
+    "is_active": PayloadSchemaType.BOOL,
+    "access_level": PayloadSchemaType.KEYWORD,
+    "source": PayloadSchemaType.KEYWORD,
+    "crawled_at": PayloadSchemaType.DATETIME,
+    "last_updated": PayloadSchemaType.DATETIME,
 }
 
 
@@ -77,7 +81,7 @@ def create_collection_if_not_exists(
                 index=SparseIndexParams(
                     on_disk=False,
                 ),
-                modifier="idf",   # BM42 IDF ağırlıklandırması
+                modifier="idf",  # BM42 IDF ağırlıklandırması
             ),
         },
         hnsw_config=HnswConfigDiff(

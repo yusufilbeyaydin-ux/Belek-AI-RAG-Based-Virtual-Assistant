@@ -1,12 +1,14 @@
 """
-qdrant_collection Asset — Qdrant'a hybrid upsert.
+qdrant_collection Asset — Qdrant'a dense upsert.
 
 Adımlar:
-1. Collection yoksa oluştur (idempotent).
+1. Collection yoksa oluştur (idempotent). Şemada dense + sparse(BM42 IDF)
+   tanımlı; ancak upsert burada YALNIZ dense yazar.
 2. Her chunk için:
-   - dense vector: HuggingFace embedding (batch=64).
-   - sparse vector: Qdrant built-in BM42 (text alanından otomatik).
-3. Batch upsert (100 chunk / batch).
+   - dense vector: HuggingFace embedding (mpnet-base-v2, 768d, batch=64).
+   - sparse vector: AKTİF DEĞİL. Etkinleştirmek için fastembed BM42 ile
+     SparseVector üretip PointStruct.vector sözlüğüne eklemek gerekir.
+3. Batch upsert (100 chunk / batch, wait=True).
 4. point_id: uuid5(NAMESPACE_URL, url + ":" + str(chunk_idx)) — deterministik.
 """
 
@@ -22,7 +24,6 @@ from ..resources.embedding_resource import EmbeddingResource
 from ..resources.qdrant_resource import QdrantResource
 from ..schemas.qdrant_schema import (
     DENSE_VECTOR_NAME,
-    SPARSE_VECTOR_NAME,
     create_collection_if_not_exists,
 )
 
@@ -40,7 +41,7 @@ def _make_point_id(url: str, chunk_idx: int) -> str:
 @asset(
     name="qdrant_collection",
     group_name="store",
-    description="Chunk'ları Qdrant'a dense+sparse (BM42) hybrid vektör olarak yazar",
+    description="Chunk'ları Qdrant'a dense (768d cosine) olarak yazar; sparse şemada hazır ama aktif değil",
     retry_policy=RetryPolicy(max_retries=2, delay=15, backoff=Backoff.EXPONENTIAL),
     compute_kind="qdrant",
 )
@@ -80,7 +81,7 @@ def qdrant_collection(
 
     # Batch upsert
     for batch_start in range(0, len(semantic_chunks), _UPSERT_BATCH):
-        batch = semantic_chunks[batch_start: batch_start + _UPSERT_BATCH]
+        batch = semantic_chunks[batch_start : batch_start + _UPSERT_BATCH]
         texts = [ch["text"] for ch in batch]
 
         # Dense embeddings (batch)
@@ -89,25 +90,29 @@ def qdrant_collection(
         except Exception as exc:
             context.log.error(
                 "Embedding hatası (batch %d-%d): %s",
-                batch_start, batch_start + len(batch), exc,
+                batch_start,
+                batch_start + len(batch),
+                exc,
             )
             failed_batches += 1
             continue
 
         # Qdrant PointStruct listesi
         points: list[PointStruct] = []
-        for chunk_dict, dense_vec in zip(batch, dense_vectors):
-            point_id = _make_point_id(
-                chunk_dict["url"], chunk_dict["chunk_idx"]
-            )
+        for chunk_dict, dense_vec in zip(batch, dense_vectors, strict=False):
+            point_id = _make_point_id(chunk_dict["url"], chunk_dict["chunk_idx"])
             points.append(
                 PointStruct(
                     id=point_id,
                     vector={
                         DENSE_VECTOR_NAME: dense_vec,
-                        # sparse BM42 — Qdrant "text" alanından otomatik üretir
-                        # Manuel sparse vektör eklemek için SparseVector kullanılır:
-                        # SPARSE_VECTOR_NAME: SparseVector(indices=[], values=[]),
+                        # Sparse BM42 aktif değil. Etkinleştirmek için:
+                        #   from fastembed import SparseTextEmbedding
+                        #   sm = SparseTextEmbedding("Qdrant/bm42-all-minilm-l6-v2-attentions")
+                        #   se = list(sm.embed([chunk_dict["text"]]))[0]
+                        #   SPARSE_VECTOR_NAME: SparseVector(indices=se.indices.tolist(),
+                        #                                    values=se.values.tolist())
+                        # ve sorgu tarafında Prefetch + FusionQuery(fusion=Fusion.RRF) gerekir.
                     },
                     payload=chunk_dict,
                 )
@@ -124,22 +129,27 @@ def qdrant_collection(
         except Exception as exc:
             context.log.error(
                 "Upsert hatası (batch %d-%d): %s",
-                batch_start, batch_start + len(batch), exc,
+                batch_start,
+                batch_start + len(batch),
+                exc,
             )
             failed_batches += 1
 
     context.log.info(
         "Upsert tamamlandı: %d chunk (%d batch başarısız)",
-        upserted, failed_batches,
+        upserted,
+        failed_batches,
     )
-    context.add_output_metadata({
-        "collection":     cfg.qdrant_collection,
-        "upserted":       upserted,
-        "failed_batches": failed_batches,
-    })
+    context.add_output_metadata(
+        {
+            "collection": cfg.qdrant_collection,
+            "upserted": upserted,
+            "failed_batches": failed_batches,
+        }
+    )
 
     return {
-        "collection":     cfg.qdrant_collection,
-        "upserted":       upserted,
+        "collection": cfg.qdrant_collection,
+        "upserted": upserted,
         "failed_batches": failed_batches,
     }
